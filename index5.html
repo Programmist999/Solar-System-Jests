@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Fixed Saturn System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; color: white; font-family: 'Segoe UI', sans-serif; }
+        #ui { position: absolute; top: 30px; left: 30px; pointer-events: none; z-index: 100; }
+        #video-container { position: absolute; bottom: 20px; right: 20px; width: 180px; border: 2px solid #555; border-radius: 12px; overflow: hidden; transform: scaleX(-1); opacity: 0.7; }
+        #controls { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; z-index: 100; }
+        button { background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 12px 25px; cursor: pointer; border-radius: 30px; backdrop-filter: blur(10px); transition: 0.3s; text-transform: uppercase; font-weight: bold; }
+        button:hover { background: #fff; color: #000; }
+        h1 { margin: 0; font-size: 3.5em; letter-spacing: 4px; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1 id="planet-name">САТУРН</h1>
+        <p id="status">Инициализация...</p>
+    </div>
+
+    <div id="controls">
+        <button onclick="flyToPlanet(-1)">Назад</button>
+        <button onclick="flyToPlanet(1)">Вперед</button>
+    </div>
+
+    <video id="input_video" style="display:none"></video>
+    <div id="video-container"><canvas id="output_canvas" style="width:100%"></canvas></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        let scene, camera, renderer, system, P_COUNT = 90000;
+        let geo, curPos, targetPos, colors;
+        let currentIdx = 5; // Начинаем сразу с Сатурна для проверки
+
+        const planets = [
+            { name: "Солнце", r: 6.5, colors: [0xffaa00, 0xff5500], moons: [] },
+            { name: "Меркурий", r: 1.3, colors: [0x888888, 0x666666], moons: [] },
+            { name: "Земля", r: 2.3, isEarth: true, moons: [{r: 0.4, dist: 5, speed: 0.8, color: 0xcccccc}] },
+            { name: "Марс", r: 1.7, colors: [0xff4500, 0xaa2200], moons: [] },
+            { name: "Юпитер", r: 4.8, colors: [0xd39c7e, 0xffe4c4], moons: [{r: 0.3, dist: 7, speed: 0.5, color: 0xffffaa}] },
+            { name: "Сатурн", r: 4.0, colors: [0xe6be8a, 0x966919], hasRings: true, moons: [{r: 0.5, dist: 10, speed: 0.3, color: 0xddddaa}] }
+        ];
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 2000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            geo = new THREE.BufferGeometry();
+            curPos = new Float32Array(P_COUNT * 3);
+            targetPos = new Float32Array(P_COUNT * 3);
+            colors = new Float32Array(P_COUNT * 3);
+
+            for(let i=0; i<P_COUNT*3; i++) curPos[i] = (Math.random()-0.5)*1000;
+            
+            geo.setAttribute('position', new THREE.BufferAttribute(curPos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            
+            system = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.04, vertexColors: true, transparent: true, opacity: 0.8 }));
+            scene.add(system);
+
+            // Звезды
+            const starPos = new Float32Array(15000 * 3);
+            for(let i=0; i<15000*3; i++) starPos[i] = (Math.random()-0.5)*2000;
+            const starGeo = new THREE.BufferGeometry();
+            starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+            scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({size: 0.7, color: 0xffffff})));
+
+            buildPlanet(currentIdx);
+            setupHands();
+            animate();
+        }
+
+        function buildPlanet(idx) {
+            const p = planets[idx];
+            document.getElementById('planet-name').innerText = p.name;
+            const colorObj = new THREE.Color();
+            
+            const BODY = 50000; // Частицы планеты
+            const RINGS = 35000; // Частицы колец
+            const MOON = 5000;  // Частицы спутника
+
+            for (let i = 0; i < P_COUNT; i++) {
+                const i3 = i * 3;
+                let x = 0, y = 0, z = 0;
+
+                if (i < BODY) {
+                    // ПЛАНЕТА (Полная сфера)
+                    const phi = Math.acos(-1 + (2 * i) / BODY);
+                    const theta = Math.sqrt(BODY * Math.PI) * phi;
+                    x = p.r * Math.cos(theta) * Math.sin(phi);
+                    y = p.r * Math.sin(theta) * Math.sin(phi);
+                    z = p.r * Math.cos(phi);
+                    
+                    if (p.isEarth) {
+                        const noise = Math.sin(x*1.2) * Math.cos(y*1.2) * Math.sin(z*1.2);
+                        colorObj.setHex(noise > 0.05 ? 0x22bb22 : 0x0055ff);
+                    } else colorObj.setHex(p.colors[i % p.colors.length]);
+                } 
+                else if (p.hasRings && i < (BODY + RINGS)) {
+                    // КОЛЬЦА (Ровно вокруг центра)
+                    const innerR = p.r + 1.5;
+                    const outerR = p.r + 5.5;
+                    const r = innerR + Math.random() * (outerR - innerR);
+                    const angle = Math.random() * Math.PI * 2;
+                    x = Math.cos(angle) * r;
+                    y = (Math.random() - 0.5) * 0.1; 
+                    z = Math.sin(angle) * r;
+                    colorObj.setHex(p.colors[0]);
+                }
+                else if (p.moons.length > 0) {
+                    // СПУТНИК
+                    const m = p.moons[0];
+                    const localI = i - (BODY + (p.hasRings ? RINGS : 0));
+                    const phi = Math.acos(-1 + (2 * (localI % 5000)) / 5000);
+                    const theta = Math.sqrt(5000 * Math.PI) * phi;
+                    x = m.r * Math.cos(theta) * Math.sin(phi);
+                    y = m.r * Math.sin(theta) * Math.sin(phi);
+                    z = m.r * Math.cos(phi);
+                    colorObj.setHex(m.color);
+                }
+
+                targetPos[i3] = x; targetPos[i3+1] = y; targetPos[i3+2] = z;
+                colors[i3] = colorObj.r; colors[i3+1] = colorObj.g; colors[i3+2] = colorObj.b;
+            }
+            geo.attributes.color.needsUpdate = true;
+        }
+
+        let handX = 0, handY = 0, isFist = false;
+        let smoothX = 0, smoothY = 0, smoothDist = 30;
+
+        function setupHands() {
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6 });
+            hands.onResults(res => {
+                if (res.multiHandLandmarks && res.multiHandLandmarks[0]) {
+                    const h = res.multiHandLandmarks[0];
+                    handX = (h[0].x - 0.5) * Math.PI * 2;
+                    handY = (h[0].y - 0.5) * Math.PI * 0.5;
+                    isFist = Math.hypot(h[12].x - h[0].x, h[12].y - h[0].y) < 0.25;
+                }
+            });
+            const videoElement = document.getElementById('input_video');
+            new Camera(videoElement, { onFrame: async () => { await hands.send({image: videoElement}); }, width: 640, height: 480 }).start();
+        }
+
+        let isFlying = false;
+        window.flyToPlanet = (dir) => {
+            if (isFlying) return;
+            isFlying = true;
+            smoothDist = 180;
+            for(let i=0; i<P_COUNT*3; i++) targetPos[i] *= 12;
+            setTimeout(() => {
+                currentIdx = (currentIdx + dir + planets.length) % planets.length;
+                buildPlanet(currentIdx);
+                smoothDist = 30;
+                isFlying = false;
+            }, 800);
+        };
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+
+            smoothX += (handX - smoothX) * 0.05;
+            smoothY += (handY - smoothY) * 0.05;
+            const tDist = isFist ? 12 : 30;
+            if(!isFlying) smoothDist += (tDist - smoothDist) * 0.05;
+
+            camera.position.x = Math.sin(smoothX + time * 0.1) * Math.cos(smoothY) * smoothDist;
+            camera.position.y = Math.sin(smoothY) * smoothDist;
+            camera.position.z = Math.cos(smoothX + time * 0.1) * Math.cos(smoothY) * smoothDist;
+            camera.lookAt(0,0,0);
+
+            const pos = geo.attributes.position.array;
+            const p = planets[currentIdx];
+
+            for (let i = 0; i < P_COUNT; i++) {
+                const i3 = i * 3;
+                let tx = targetPos[i3], ty = targetPos[i3+1], tz = targetPos[i3+2];
+
+                // ГЛАВНЫЙ ФИКС: Смещение спутника на орбиту в реальном времени
+                const moonStartIdx = 50000 + (p.hasRings ? 35000 : 0);
+                if (i >= moonStartIdx && p.moons.length > 0 && !isFlying) {
+                    const m = p.moons[0];
+                    const mt = time * m.speed;
+                    tx += Math.cos(mt) * m.dist;
+                    tz += Math.sin(mt) * m.dist;
+                }
+
+                pos[i3] += (tx - pos[i3]) * 0.08;
+                pos[i3+1] += (ty - pos[i3+1]) * 0.08;
+                pos[i3+2] += (tz - pos[i3+2]) * 0.08;
+            }
+            geo.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>
